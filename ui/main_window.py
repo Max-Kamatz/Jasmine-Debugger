@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         self._port_field = QSpinBox()
         self._port_field.setRange(1, 65535)
         self._port_field.setValue(22)
-        self._port_field.setFixedWidth(60)
+        self._port_field.setFixedWidth(80)
         toolbar.addWidget(self._port_field)
 
         toolbar.addWidget(QLabel("  Pass:"))
