@@ -35,7 +35,7 @@ All background work runs in `SSHBridge(QThread)`. The UI thread never blocks.
 
 1. User clicks **Connect**
 2. `paramiko.connect(ip, user, pass)` — SSH to AAEON
-3. `exec_command("sudo systemctl stop JafarService")` — free the serial port
+3. `exec_command("echo '<password>' | sudo -S systemctl stop JafarService")` — free the serial port (password piped to sudo to avoid interactive prompt)
 4. `exec_command("ls -la /dev/serial/by-id/")` — find the line containing `JASMINE`, resolve to full device path (e.g. `/dev/ttyUSB0`)
 5. Open a persistent shell channel and launch a one-liner Python serial relay on the AAEON:
    ```
@@ -44,7 +44,7 @@ All background work runs in `SSHBridge(QThread)`. The UI thread never blocks.
    This bridges `stdin` → serial Tx and serial Rx → `stdout` over the SSH channel.
 6. Emit `connected` signal → UI enables command panel
 7. Read loop in the thread emits `rx_data(str)` for each line received from Jasmine
-8. On **Disconnect**: close channel → `exec_command("sudo systemctl start JafarService")`
+8. On **Disconnect**: close channel → `exec_command("echo '<password>' | sudo -S systemctl start JafarService")`
 
 ---
 
@@ -161,3 +161,20 @@ Rx colour: #3fb950
 
 - `PyQt6`
 - `paramiko`
+- `pyinstaller` (build only)
+
+---
+
+## Distribution
+
+The application is packaged as a single `.exe` using PyInstaller:
+
+```
+pyinstaller --onefile --windowed --name JasmineDebugger main.py
+```
+
+- `--onefile` — bundles everything into a single executable
+- `--windowed` — suppresses the console window on launch
+- Output: `dist/JasmineDebugger.exe`
+
+A `JasmineDebugger.spec` file will be committed to the repo so builds are reproducible. Any hidden imports required by `paramiko` (e.g. `paramiko.ed25519key`, `cryptography`) must be declared in the spec.
