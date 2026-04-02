@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-_TX_BG = QColor("#0a1a3d")
-_RX_BG = QColor("#0d2b14")
+_TX_BG  = QColor("#0a1a3d")
+_RX_BG  = QColor("#0d2b14")
+_ERR_BG = QColor("#3d0a0a")
 _MAX_ROWS = 20_000
 
 
@@ -60,7 +61,7 @@ class CommsLog(QWidget):
             row = self._table.rowCount()
 
         self._table.insertRow(row)
-        bg = _TX_BG if direction == "Tx" else _RX_BG
+        bg = _TX_BG if direction == "Tx" else _ERR_BG if direction == "ERR" else _RX_BG
         for col, value in enumerate([ts, direction, text]):
             item = QTableWidgetItem(value)
             item.setBackground(bg)

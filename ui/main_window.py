@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         self._bridge.tx_logged.connect(lambda t: self._comms_log.append_entry("Tx", t))
         self._bridge.error.connect(self._on_error)
         self._bridge.status_update.connect(self._status_label.setText)
+        self._bridge.status_update.connect(lambda t: self._comms_log.append_entry("---", t))
         self._command_panel.command_requested.connect(self._bridge.send_command)
 
         self._bridge.start()
@@ -152,6 +153,7 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg: str) -> None:
         self._status_label.setText(f"Error: {msg}")
+        self._comms_log.append_entry("ERR", msg)
         self._btn_connect.setEnabled(True)
         self._btn_disconnect.setEnabled(False)
         self._command_panel.set_enabled(False)
