@@ -165,7 +165,7 @@ class SSHBridge(QThread):
         return exit_code == 0, out.strip()
 
     def _restart_service(self) -> None:
-        if self._client is None:
+        if self._client is None or self._client.get_transport() is None:
             return
         self._exec_sudo("systemctl start JafarService")
 
