@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QToolBar,
     QWidget,
@@ -69,6 +70,13 @@ class MainWindow(QMainWindow):
         self._user_field.setFixedWidth(110)
         toolbar.addWidget(self._user_field)
 
+        toolbar.addWidget(QLabel("  Port:"))
+        self._port_field = QSpinBox()
+        self._port_field.setRange(1, 65535)
+        self._port_field.setValue(22)
+        self._port_field.setFixedWidth(60)
+        toolbar.addWidget(self._port_field)
+
         toolbar.addWidget(QLabel("  Pass:"))
         self._pass_field = QLineEdit("Sentinel123")
         self._pass_field.setEchoMode(QLineEdit.EchoMode.Password)
@@ -113,7 +121,7 @@ class MainWindow(QMainWindow):
 
         self._bridge = SSHBridge(
             self._ip_field.text(),
-            22,
+            self._port_field.value(),
             self._user_field.text(),
             self._pass_field.text(),
         )
