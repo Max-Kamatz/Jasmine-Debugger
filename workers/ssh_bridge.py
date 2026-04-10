@@ -54,7 +54,6 @@ class SSHBridge(QThread):
         self._running = False
         self._client: Optional[paramiko.SSHClient] = None
         self._channel: Optional[paramiko.Channel] = None
-        self._service_name: Optional[str] = None
 
     def run(self) -> None:
         try:
@@ -81,16 +80,11 @@ class SSHBridge(QThread):
             self.error.emit(f"SSH connection failed: {exc}")
             return
 
-        # 2. Discover and stop the MotorControl service (name includes version suffix)
-        self.status_update.emit("Locating MotorControl service...")
-        self._service_name = self._find_motor_control_service()
-        if self._service_name is None:
-            self.error.emit("No running service containing 'MotorControl' found")
-            return
-        self.status_update.emit(f"Stopping {self._service_name}...")
-        ok, output = self._exec_sudo(f"systemctl stop {self._service_name}")
+        # 2. Kill the MotorControl process (not a systemd service; matched by name pattern)
+        self.status_update.emit("Stopping MotorControl...")
+        ok, output = self._exec_sudo("pkill -f MotorControl")
         if not ok:
-            self.error.emit(f"Failed to stop {self._service_name}: {output}")
+            self.error.emit(f"Failed to stop MotorControl: {output}")
             return
 
         # 3. Locate JASMINE serial port
@@ -170,24 +164,8 @@ class SSHBridge(QThread):
         channel.close()
         return exit_code == 0, out.strip()
 
-    def _find_motor_control_service(self) -> Optional[str]:
-        """Query running systemd services and return the name of the first
-        unit whose name contains 'MotorControl', or None if not found."""
-        _, output = self._exec(
-            "systemctl list-units --type=service --state=running --no-legend --no-pager"
-        )
-        for line in output.splitlines():
-            parts = line.split()
-            if parts and "MotorControl" in parts[0]:
-                return parts[0]
-        return None
-
     def _restart_service(self) -> None:
-        if self._client is None or self._client.get_transport() is None:
-            return
-        if self._service_name is None:
-            return
-        self._exec_sudo(f"systemctl start {self._service_name}")
+        pass  # MotorControl is restarted manually after disconnect
 
     def _cleanup(self) -> None:
         self._channel = None
