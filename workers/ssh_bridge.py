@@ -105,7 +105,7 @@ class SSHBridge(QThread):
         script = RELAY_SCRIPT.format(port=device_path)
         encoded = base64.b64encode(script.encode()).decode()
         relay_cmd = (
-            'python3 -c '
+            'sudo -S python3 -c '
             f'"import base64; exec(base64.b64decode(\\"{encoded}\\").decode())"'
         )
 
@@ -113,6 +113,8 @@ class SSHBridge(QThread):
         self._channel = transport.open_session()
         self._channel.get_pty()
         self._channel.exec_command(relay_cmd)
+        # Feed sudo password via stdin; channel stays open for serial data after this
+        self._channel.sendall(f"{self._password}\n".encode("utf-8"))
 
         # 6. Give relay a moment to start; fail fast if it exits immediately
         self.msleep(500)
