@@ -303,10 +303,16 @@ class CommandPanel(QWidget):
     # Helpers
     # ------------------------------------------------------------------
 
+    _SYSTEM_CMDS = frozenset({
+        "VER", "S", "MODE", "RESET", "SAVE", "DEFAULTS",
+        "FIX", "UNFIX", "INITCOM",
+    })
+
     def _send(self, cmd: str, params: Optional[List] = None,
               query: bool = False, realtime: bool = False) -> None:
+        axis = "*" if cmd in self._SYSTEM_CMDS else self._axis()
         text = build_command(
-            self._axis(), cmd,
+            axis, cmd,
             params=params,
             query=query,
             realtime=realtime,

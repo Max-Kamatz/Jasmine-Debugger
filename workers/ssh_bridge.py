@@ -1,4 +1,7 @@
 import base64
+import json
+import ssl
+import urllib.request
 from typing import Optional, Tuple
 
 import paramiko
@@ -6,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 RELAY_SCRIPT = """\
 import serial, sys, threading, os
-s = serial.Serial('{port}', 115200, timeout=0.1)
+s = serial.Serial('{port}', {baud}, timeout=0.1)
 def _r():
     while True:
         try:
@@ -23,6 +26,7 @@ try:
         if not d:
             break
         s.write(d)
+        s.flush()
 except Exception:
     pass
 """
@@ -45,12 +49,14 @@ class SSHBridge(QThread):
     error = pyqtSignal(str)
     status_update = pyqtSignal(str)
 
-    def __init__(self, host: str, port: int, username: str, password: str, parent=None):
+    def __init__(self, host: str, port: int, username: str, password: str,
+                 baud: int = 115200, parent=None):
         super().__init__(parent)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        self._baud = baud
         self._running = False
         self._client: Optional[paramiko.SSHClient] = None
         self._channel: Optional[paramiko.Channel] = None
@@ -80,11 +86,13 @@ class SSHBridge(QThread):
             self.error.emit(f"SSH connection failed: {exc}")
             return
 
-        # 2. Kill the MotorControl process (not a systemd service; matched by name pattern)
-        # pkill returns 0 if killed, 1 if no process found — both are acceptable to proceed
-        self.status_update.emit("Stopping MotorControl...")
-        self._exec_sudo("pkill -f MotorControl")
-        self.msleep(2000)  # allow OS to release the serial port after process kill
+        # 2. Shut down MotorControl via ServiceManager API
+        self.status_update.emit("Shutting down MotorControl...")
+        ok, err = self._shutdown_motor_control()
+        if not ok:
+            self.error.emit(f"ServiceManager shutdown failed: {err}")
+            return
+        self.msleep(2000)  # allow ServiceManager to stop the process and release the port
 
         # 3. Locate JASMINE serial port
         self.status_update.emit("Locating JASMINE serial port...")
@@ -101,8 +109,9 @@ class SSHBridge(QThread):
             return
 
         # 5. Launch serial relay over persistent SSH channel
+        self.status_update.emit(f"Port: /dev/serial/by-id/{port_name} → {device_path}")
         self.status_update.emit(f"Starting serial relay on {device_path}...")
-        script = RELAY_SCRIPT.format(port=device_path)
+        script = RELAY_SCRIPT.format(port=device_path, baud=self._baud)
         encoded = base64.b64encode(script.encode()).decode()
         relay_cmd = (
             'sudo -S python3 -c '
@@ -111,7 +120,6 @@ class SSHBridge(QThread):
 
         transport = self._client.get_transport()
         self._channel = transport.open_session()
-        self._channel.get_pty()
         self._channel.exec_command(relay_cmd)
         # Feed sudo password via stdin; channel stays open for serial data after this
         self._channel.sendall(f"{self._password}\n".encode("utf-8"))
@@ -127,13 +135,20 @@ class SSHBridge(QThread):
         self.status_update.emit(f"Connected to {device_path}")
         self.connected.emit()
 
-        # 8. Read loop
-        for raw_line in self._channel.makefile("rb"):
-            text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-            if text:
-                self.rx_data.emit(text)
-            if not self._running:
+        # 8. Read loop — poll recv() to avoid blocking on newline detection
+        buf = b""
+        while self._running:
+            if self._channel.recv_ready():
+                buf += self._channel.recv(4096)
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="replace").rstrip("\r")
+                    if text:
+                        self.rx_data.emit(text)
+            elif self._channel.exit_status_ready():
                 break
+            else:
+                self.msleep(10)
 
     def send_command(self, text: str) -> None:
         if self._channel is None or not self._running:
@@ -164,6 +179,25 @@ class SSHBridge(QThread):
         exit_code = channel.recv_exit_status()
         channel.close()
         return exit_code == 0, out.strip()
+
+    def _shutdown_motor_control(self) -> Tuple[bool, str]:
+        """POST a Shutdown request to ServiceManager for MotorControl."""
+        url = f"https://{self._host}/SMv2/ServiceStatus"
+        payload = json.dumps({"ServiceName": "MotorControl", "Op": "Shutdown"}).encode()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=10):
+                pass
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
 
     def _restart_service(self) -> None:
         pass  # MotorControl is restarted manually after disconnect

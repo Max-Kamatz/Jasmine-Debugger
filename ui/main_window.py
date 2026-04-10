@@ -2,6 +2,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QComboBox,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -83,6 +84,13 @@ class MainWindow(QMainWindow):
         self._pass_field.setFixedWidth(110)
         toolbar.addWidget(self._pass_field)
 
+        toolbar.addWidget(QLabel("  Baud:"))
+        self._baud_combo = QComboBox()
+        for rate in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600):
+            self._baud_combo.addItem(str(rate), rate)
+        self._baud_combo.setCurrentText("115200")
+        toolbar.addWidget(self._baud_combo)
+
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.clicked.connect(self._on_connect)
         toolbar.addWidget(self._btn_connect)
@@ -124,6 +132,7 @@ class MainWindow(QMainWindow):
             self._port_field.value(),
             self._user_field.text(),
             self._pass_field.text(),
+            baud=self._baud_combo.currentData(),
         )
         self._bridge.connected.connect(self._on_connected)
         self._bridge.disconnected.connect(self._on_disconnected)
@@ -149,6 +158,8 @@ class MainWindow(QMainWindow):
         self._btn_connect.setEnabled(True)
         self._btn_disconnect.setEnabled(False)
         self._status_label.setText("Disconnected")
+        if self._bridge is not None:
+            self._bridge.wait()
         self._bridge = None
 
     def _on_error(self, msg: str) -> None:
