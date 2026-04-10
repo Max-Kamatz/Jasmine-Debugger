@@ -81,11 +81,9 @@ class SSHBridge(QThread):
             return
 
         # 2. Kill the MotorControl process (not a systemd service; matched by name pattern)
+        # pkill returns 0 if killed, 1 if no process found — both are acceptable to proceed
         self.status_update.emit("Stopping MotorControl...")
-        ok, output = self._exec_sudo("pkill -f MotorControl")
-        if not ok:
-            self.error.emit(f"Failed to stop MotorControl: {output}")
-            return
+        self._exec_sudo("pkill -f MotorControl")
 
         # 3. Locate JASMINE serial port
         self.status_update.emit("Locating JASMINE serial port...")
