@@ -36,6 +36,13 @@ QGroupBox {
 QGroupBox::title { subcontrol-origin: margin; left: 8px; }
 QCheckBox { color: #c9d1d9; }
 QScrollArea { border: none; }
+QTabWidget::pane { border: 1px solid #30363d; }
+QTabBar::tab {
+    background: #161b22; color: #8b949e;
+    padding: 4px 10px; border: 1px solid #30363d;
+}
+QTabBar::tab:selected { background: #0d1117; color: #c9d1d9; border-bottom: none; }
+QTabBar::tab:hover { background: #1c2333; }
 QTableWidget {
     background: #0d1117; color: #c9d1d9;
     gridline-color: #30363d; border: 1px solid #30363d;
@@ -86,7 +93,7 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(QLabel("  Baud:"))
         self._baud_combo = QComboBox()
-        for rate in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600):
+        for rate in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 800000, 921600):
             self._baud_combo.addItem(str(rate), rate)
         self._baud_combo.setCurrentText("115200")
         toolbar.addWidget(self._baud_combo)
