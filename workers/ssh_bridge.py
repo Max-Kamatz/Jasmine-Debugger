@@ -50,15 +50,17 @@ class SSHBridge(QThread):
     status_update = pyqtSignal(str)
 
     def __init__(self, host: str, port: int, username: str, password: str,
-                 baud: int = 115200, parent=None):
+                 baud: int = 115200, hop_target: Optional[str] = None, parent=None):
         super().__init__(parent)
         self._host = host
         self._port = port
         self._username = username
         self._password = password
         self._baud = baud
+        self._hop_target = hop_target
         self._running = False
         self._client: Optional[paramiko.SSHClient] = None
+        self._hop_client: Optional[paramiko.SSHClient] = None
         self._channel: Optional[paramiko.Channel] = None
 
     def run(self) -> None:
@@ -72,7 +74,7 @@ class SSHBridge(QThread):
             self.disconnected.emit()
 
     def _run_session(self) -> None:
-        # 1. SSH connect
+        # 1. SSH into primary host
         self.status_update.emit("Connecting via SSH...")
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -86,29 +88,47 @@ class SSHBridge(QThread):
             self.error.emit(f"SSH connection failed: {exc}")
             return
 
-        # 2. Shut down MotorControl via ServiceManager API
-        self.status_update.emit("Shutting down MotorControl...")
-        ok, err = self._shutdown_motor_control()
-        if not ok:
-            self.error.emit(f"ServiceManager shutdown failed: {err}")
-            return
-        self.msleep(2000)  # allow ServiceManager to stop the process and release the port
+        if self._hop_target:
+            # 2a. Hop — tunnel through primary to secondary; skip MotorControl shutdown
+            self.status_update.emit(f"Hopping to {self._hop_target}...")
+            try:
+                hop_sock = self._client.get_transport().open_channel(
+                    "direct-tcpip", (self._hop_target, 22), ("127.0.0.1", 0)
+                )
+                hop_transport = paramiko.Transport(hop_sock)
+                hop_transport.connect(username=self._username, password=self._password)
+                self._hop_client = paramiko.SSHClient()
+                self._hop_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                self._hop_client._transport = hop_transport
+            except Exception as exc:
+                self.error.emit(f"Hop to {self._hop_target} failed: {exc}")
+                return
+            serial_client = self._hop_client
+        else:
+            # 2b. Direct — shut down MotorControl on primary before touching the port
+            self.status_update.emit("Shutting down MotorControl...")
+            ok, err = self._shutdown_motor_control()
+            if not ok:
+                self.error.emit(f"ServiceManager shutdown failed: {err}")
+                return
+            self.msleep(2000)  # allow ServiceManager to release the port
+            serial_client = self._client
 
-        # 3. Locate JASMINE serial port
+        # 3. Locate JASMINE serial port on the target host
         self.status_update.emit("Locating JASMINE serial port...")
-        _, ls_output = self._exec("ls /dev/serial/by-id/ 2>/dev/null")
+        _, ls_output = self._exec_on(serial_client, "ls /dev/serial/by-id/ 2>/dev/null")
         port_name = _find_jasmine_port(ls_output)
         if port_name is None:
             self.error.emit("JASMINE port not found in /dev/serial/by-id/")
             return
 
         # 4. Resolve symlink to absolute device path
-        ok, device_path = self._exec(f"readlink -f /dev/serial/by-id/{port_name}")
+        ok, device_path = self._exec_on(serial_client, f"readlink -f /dev/serial/by-id/{port_name}")
         if not device_path:
             self.error.emit(f"Could not resolve device path for {port_name}")
             return
 
-        # 5. Launch serial relay over persistent SSH channel
+        # 5. Launch serial relay over persistent SSH channel on the target host
         self.status_update.emit(f"Port: /dev/serial/by-id/{port_name} → {device_path}")
         self.status_update.emit(f"Starting serial relay on {device_path}...")
         script = RELAY_SCRIPT.format(port=device_path, baud=self._baud)
@@ -118,7 +138,7 @@ class SSHBridge(QThread):
             f'"import base64; exec(base64.b64decode(\\"{encoded}\\").decode())"'
         )
 
-        transport = self._client.get_transport()
+        transport = serial_client.get_transport()
         self._channel = transport.open_session()
         self._channel.exec_command(relay_cmd)
         # Feed sudo password via stdin; channel stays open for serial data after this
@@ -132,7 +152,8 @@ class SSHBridge(QThread):
 
         # 7. Mark as connected
         self._running = True
-        self.status_update.emit(f"Connected to {device_path}")
+        target_label = self._hop_target if self._hop_target else self._host
+        self.status_update.emit(f"Connected — {target_label} → {device_path}")
         self.connected.emit()
 
         # 8. Read loop — poll recv() to avoid blocking on newline detection
@@ -161,16 +182,19 @@ class SSHBridge(QThread):
         if self._channel is not None:
             self._channel.close()
 
-    def _exec(self, cmd: str) -> Tuple[bool, str]:
-        """Run a command over SSH, return (success, stdout+stderr)."""
-        _, stdout, stderr = self._client.exec_command(cmd)
+    def _exec_on(self, client: paramiko.SSHClient, cmd: str) -> Tuple[bool, str]:
+        """Run a command on the given SSHClient, return (success, stdout+stderr)."""
+        _, stdout, stderr = client.exec_command(cmd)
         out = stdout.read().decode("utf-8", errors="replace")
         err = stderr.read().decode("utf-8", errors="replace")
         exit_code = stdout.channel.recv_exit_status()
         return exit_code == 0, (out + err).strip()
 
+    def _exec(self, cmd: str) -> Tuple[bool, str]:
+        return self._exec_on(self._client, cmd)
+
     def _exec_sudo(self, cmd: str) -> Tuple[bool, str]:
-        """Run a command with sudo, feeding password via stdin."""
+        """Run a command with sudo on the primary host, feeding password via stdin."""
         channel = self._client.get_transport().open_session()
         channel.exec_command(f"sudo -S {cmd} 2>&1")
         channel.sendall(f"{self._password}\n".encode("utf-8"))
@@ -204,6 +228,12 @@ class SSHBridge(QThread):
 
     def _cleanup(self) -> None:
         self._channel = None
+        if self._hop_client is not None:
+            try:
+                self._hop_client.close()
+            except Exception:
+                pass
+            self._hop_client = None
         if self._client is not None:
             self._client.close()
             self._client = None

@@ -95,8 +95,17 @@ class MainWindow(QMainWindow):
         self._baud_combo = QComboBox()
         for rate in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 800000, 921600):
             self._baud_combo.addItem(str(rate), rate)
-        self._baud_combo.setCurrentText("115200")
+        self._baud_combo.setCurrentText("800000")
         toolbar.addWidget(self._baud_combo)
+
+        toolbar.addWidget(QLabel("  Target:"))
+        self._target_combo = QComboBox()
+        self._target_combo.addItem("Primary (Direct)", None)
+        for ip in ("10.10.10.2", "10.10.10.3", "10.10.10.4",
+                   "10.10.10.5", "10.10.10.6", "10.10.10.7"):
+            self._target_combo.addItem(ip, ip)
+        self._target_combo.setFixedWidth(140)
+        toolbar.addWidget(self._target_combo)
 
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.clicked.connect(self._on_connect)
@@ -132,6 +141,7 @@ class MainWindow(QMainWindow):
 
     def _on_connect(self) -> None:
         self._btn_connect.setEnabled(False)
+        self._target_combo.setEnabled(False)
         self._status_label.setText("Connecting...")
 
         self._bridge = SSHBridge(
@@ -140,6 +150,7 @@ class MainWindow(QMainWindow):
             self._user_field.text(),
             self._pass_field.text(),
             baud=self._baud_combo.currentData(),
+            hop_target=self._target_combo.currentData(),
         )
         self._bridge.connected.connect(self._on_connected)
         self._bridge.disconnected.connect(self._on_disconnected)
@@ -164,6 +175,7 @@ class MainWindow(QMainWindow):
         self._command_panel.set_enabled(False)
         self._btn_connect.setEnabled(True)
         self._btn_disconnect.setEnabled(False)
+        self._target_combo.setEnabled(True)
         self._status_label.setText("Disconnected")
         if self._bridge is not None:
             self._bridge.wait()
@@ -174,6 +186,7 @@ class MainWindow(QMainWindow):
         self._comms_log.append_entry("ERR", msg)
         self._btn_connect.setEnabled(True)
         self._btn_disconnect.setEnabled(False)
+        self._target_combo.setEnabled(True)
         self._command_panel.set_enabled(False)
 
     # ------------------------------------------------------------------
