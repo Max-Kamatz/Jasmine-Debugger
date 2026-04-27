@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.command_builder import build_command
+from ui.jog_pad import JogPad
 
 
 class CommandPanel(QWidget):
@@ -109,6 +110,7 @@ class CommandPanel(QWidget):
                 self._build_axis_motion(),
                 self._build_joint_motion(),
                 self._build_motion_queries(),
+                self._build_jog_pad(),
             )),
             "Motion",
         )
@@ -223,17 +225,17 @@ class CommandPanel(QWidget):
 
         row = QHBoxLayout()
         row.addWidget(QLabel("MJJ  Pan vel (deg/s):"))
-        spin_p = QDoubleSpinBox()
-        spin_p.setRange(-9999, 9999)
-        spin_p.setDecimals(1)
-        row.addWidget(spin_p)
+        self._mjj_spin_p = QDoubleSpinBox()
+        self._mjj_spin_p.setRange(-9999, 9999)
+        self._mjj_spin_p.setDecimals(1)
+        row.addWidget(self._mjj_spin_p)
         row.addWidget(QLabel("Tilt vel (deg/s):"))
-        spin_t = QDoubleSpinBox()
-        spin_t.setRange(-9999, 9999)
-        spin_t.setDecimals(1)
+        self._mjj_spin_t = QDoubleSpinBox()
+        self._mjj_spin_t.setRange(-9999, 9999)
+        self._mjj_spin_t.setDecimals(1)
         btn = QPushButton("Send")
-        btn.clicked.connect(lambda _, sp=spin_p, st=spin_t: self._send("MJJ", params=[sp.value(), st.value()]))
-        row.addWidget(spin_t)
+        btn.clicked.connect(lambda _: self._send("MJJ", params=[self._mjj_spin_p.value(), self._mjj_spin_t.value()]))
+        row.addWidget(self._mjj_spin_t)
         row.addWidget(btn)
         layout.addLayout(row)
 
@@ -264,6 +266,35 @@ class CommandPanel(QWidget):
             btn.clicked.connect(lambda _, c=cmd: self._send_axis(c, query=True))
             layout.addWidget(btn)
         return box
+
+    def _build_jog_pad(self) -> QGroupBox:
+        box = QGroupBox("Jog Trackpad — drag to jog both axes, release to stop")
+        layout = QHBoxLayout(box)
+
+        self._jog_pad = JogPad()
+        self._jog_pad.jog_requested.connect(self._on_jog)
+        self._jog_pad.stop_requested.connect(lambda: self._send("MJS"))
+        layout.addWidget(self._jog_pad)
+
+        info = QLabel(
+            "Drag within the circle to jog\n"
+            "both axes simultaneously.\n\n"
+            "Speed scales linearly with\n"
+            "distance from centre.\n\n"
+            "Max speed = MJJ spinboxes above\n"
+            "(magnitude only)."
+        )
+        layout.addWidget(info)
+        layout.addStretch()
+
+        return box
+
+    def _on_jog(self, pan_frac: float, tilt_frac: float) -> None:
+        max_p = abs(self._mjj_spin_p.value())
+        max_t = abs(self._mjj_spin_t.value())
+        pan_vel = round(pan_frac * max_p, 1)
+        tilt_vel = round(tilt_frac * max_t, 1)
+        self._send("MJJ", params=[pan_vel, tilt_vel])
 
     # ------------------------------------------------------------------
     # Vel/Profile tab
