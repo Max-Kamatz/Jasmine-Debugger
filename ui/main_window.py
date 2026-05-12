@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
             hop_target=self._target_combo.currentData(),
             port_filter=port_filter,
             companion_service=companion_service,
+            config=config,
         )
         self._bridge.connected.connect(self._on_connected)
         self._bridge.disconnected.connect(self._on_disconnected)

@@ -66,6 +66,7 @@ class SSHBridge(QThread):
                  baud: int = 115200, hop_target: Optional[str] = None,
                  port_filter: str = "JASMINE",
                  companion_service: Optional[str] = None,
+                 config: str = "MK4",
                  parent=None):
         super().__init__(parent)
         self._host = host
@@ -76,6 +77,7 @@ class SSHBridge(QThread):
         self._hop_target = hop_target
         self._port_filter = port_filter
         self._companion_service = companion_service
+        self._config = config
         self._running = False
         self._client: Optional[paramiko.SSHClient] = None
         self._hop_client: Optional[paramiko.SSHClient] = None
@@ -111,8 +113,10 @@ class SSHBridge(QThread):
             self.status_update.emit(f"Hopping to {self._hop_target}...")
             try:
                 hop_sock = self._client.get_transport().open_channel(
-                    "direct-tcpip", (self._hop_target, 22), ("127.0.0.1", 0)
+                    "direct-tcpip", (self._hop_target, 22), ("127.0.0.1", 0),
+                    timeout=10,
                 )
+                hop_sock.settimeout(10)
                 hop_transport = paramiko.Transport(hop_sock)
                 hop_transport.connect(username=self._username, password=self._password)
                 self._hop_client = paramiko.SSHClient()
@@ -133,20 +137,18 @@ class SSHBridge(QThread):
             serial_client = self._hop_client
         else:
             # 2b. Direct — shut down the relevant service before touching the port
+            service = self._companion_service or "MotorControl"
+            self.status_update.emit(f"Shutting down {service}...")
+            if self._config == "MK4":
+                ok, err = self._shutdown_service(service)
+            else:
+                ok, err = self._shutdown_svcmgr(service, self._host)
+            if not ok:
+                self.error.emit(f"ServiceManager shutdown failed: {err}")
+                return
             if self._companion_service:
-                self.status_update.emit(f"Shutting down {self._companion_service}...")
-                ok, err = self._shutdown_companion_service(self._host)
-                if not ok:
-                    self.error.emit(f"ServiceManager shutdown failed: {err}")
-                    return
                 self.status_update.emit("Waiting for port release...")
                 self.msleep(2000)
-            else:
-                self.status_update.emit("Shutting down MotorControl...")
-                ok, err = self._shutdown_service("MotorControl")
-                if not ok:
-                    self.error.emit(f"ServiceManager shutdown failed: {err}")
-                    return
             serial_client = self._client
 
         # 3 & 4. Poll for target serial port — udev may take time to settle after service exits
@@ -275,13 +277,16 @@ class SSHBridge(QThread):
         except Exception as exc:
             return False, str(exc)
 
-    def _shutdown_companion_service(self, host: str) -> Tuple[bool, str]:
-        """POST a CompanionService shutdown via the SvcMgr API (multipart/form-data, HTTP port 8000)."""
+    def _shutdown_svcmgr(self, service_name: str, host: str) -> Tuple[bool, str]:
+        """POST a service shutdown via the MK2 SvcMgr API (HTTP port 8000, multipart/form-data).
+
+        Used for all MK2 shutdowns — MotorControl and CompanionService alike.
+        """
         boundary = "----JasmineDebuggerBoundary"
         body = (
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="SvcShutdown"\r\n\r\n'
-            f"CompanionService\r\n"
+            f"{service_name}\r\n"
             f"--{boundary}--\r\n"
         ).encode()
         url = f"http://{host}:8000/SvcMgr/ActionCommand"
@@ -300,28 +305,46 @@ class SSHBridge(QThread):
     def _shutdown_service_remote(self, service_name: str, host: str) -> Tuple[bool, str]:
         """Shut down a service on a hop target via the primary host's ServiceManager proxy.
 
-        The primary exposes /SvcMgr/Payload/{hop_ip}/ActionCommand to relay commands to hop
-        targets. The dev machine reaches this directly on port 8000 of the primary host.
+        MK4: HTTPS to /SMv2/Payloads/{hop_ip}/ServiceStatus with text/plain JSON body.
+        MK2: HTTP port 8000 to /SvcMgr/Payload/{hop_ip}/ActionCommand with multipart body.
         """
-        boundary = "----JasmineDebuggerBoundary"
-        body = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="SvcShutdown"\r\n\r\n'
-            f"{service_name}\r\n"
-            f"--{boundary}--\r\n"
-        ).encode()
-        url = f"http://{self._host}:8000/SvcMgr/Payload/{host}/ActionCommand"
-        req = urllib.request.Request(
-            url, data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10):
-                pass
-            return True, ""
-        except Exception as exc:
-            return False, str(exc)
+        if self._config == "MK4":
+            payload = json.dumps({"ServiceName": service_name, "Op": "Shutdown"}).encode()
+            url = f"https://{self._host}/SMv2/Payloads/{host}/ServiceStatus"
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "text/plain;charset=UTF-8"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, context=ctx, timeout=10):
+                    pass
+                return True, ""
+            except Exception as exc:
+                return False, str(exc)
+        else:
+            boundary = "----JasmineDebuggerBoundary"
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="SvcShutdown"\r\n\r\n'
+                f"{service_name}\r\n"
+                f"--{boundary}--\r\n"
+            ).encode()
+            url = f"http://{self._host}:8000/SvcMgr/Payload/{host}/ActionCommand"
+            req = urllib.request.Request(
+                url, data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10):
+                    pass
+                return True, ""
+            except Exception as exc:
+                return False, str(exc)
 
     def _restart_service(self) -> None:
         pass  # MotorControl is restarted manually after disconnect
