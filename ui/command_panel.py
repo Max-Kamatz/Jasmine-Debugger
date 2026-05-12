@@ -26,8 +26,9 @@ from ui.jog_pad import JogPad
 class CommandPanel(QWidget):
     command_requested = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, mk2: bool = False, parent=None):
         super().__init__(parent)
+        self._mk2 = mk2
         self._build_ui()
         self.set_enabled(False)
 
@@ -148,15 +149,17 @@ class CommandPanel(QWidget):
             )),
             "System",
         )
+        power_groups = [
+            self._build_power_channels(),
+            self._build_half_bridge(),
+            self._build_optical(),
+            self._build_fan(),
+            self._build_xio(),
+        ]
+        if not self._mk2:
+            power_groups.insert(1, self._build_motor_current())
         self._tabs.addTab(
-            self._scrollable(self._vbox(
-                self._build_power_channels(),
-                self._build_motor_current(),
-                self._build_half_bridge(),
-                self._build_optical(),
-                self._build_fan(),
-                self._build_xio(),
-            )),
+            self._scrollable(self._vbox(*power_groups)),
             "Power/I-O",
         )
         self._tabs.addTab(

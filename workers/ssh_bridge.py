@@ -8,37 +8,50 @@ import paramiko
 from PyQt6.QtCore import QThread, pyqtSignal
 
 RELAY_SCRIPT = """\
-import serial, sys, threading, os
-s = serial.Serial('{port}', {baud}, timeout=0.1)
+import sys, threading, os
+
+_PORT = '{port}'
+_BAUD = {baud}
+
+try:
+    import serial
+    _ser = serial.Serial(_PORT, _BAUD, timeout=0.1)
+    def _read(): return _ser.read(256)
+    def _write(d): _ser.write(d); _ser.flush()
+except ImportError:
+    import termios
+    _B = {{9600:termios.B9600,19200:termios.B19200,38400:termios.B38400,
+           57600:termios.B57600,115200:termios.B115200,230400:termios.B230400,
+           460800:termios.B460800,921600:termios.B921600}}
+    if _BAUD not in _B:
+        raise RuntimeError('pyserial required for baud rate ' + str(_BAUD))
+    _fd = os.open(_PORT, os.O_RDWR | os.O_NOCTTY)
+    _a = termios.tcgetattr(_fd)
+    _a[0] = 0; _a[1] = 0
+    _a[2] = _B[_BAUD] | termios.CS8 | termios.CREAD | termios.CLOCAL
+    _a[3] = 0; _a[4] = _B[_BAUD]; _a[5] = _B[_BAUD]
+    _a[6][termios.VMIN] = 0; _a[6][termios.VTIME] = 1
+    termios.tcsetattr(_fd, termios.TCSANOW, _a)
+    def _read():
+        try: return os.read(_fd, 256)
+        except OSError: return b''
+    def _write(d): os.write(_fd, d)
+
 def _r():
     while True:
         try:
-            d = s.read(256)
-            if d:
-                sys.stdout.buffer.write(d)
-                sys.stdout.buffer.flush()
-        except Exception:
-            break
+            d = _read()
+            if d: sys.stdout.buffer.write(d); sys.stdout.buffer.flush()
+        except Exception: break
 threading.Thread(target=_r, daemon=True).start()
 try:
     while True:
         d = os.read(sys.stdin.fileno(), 256)
-        if not d:
-            break
-        s.write(d)
-        s.flush()
-except Exception:
-    pass
+        if not d: break
+        _write(d)
+except Exception: pass
 """
 
-
-def _find_jasmine_port(ls_output: str) -> Optional[str]:
-    """Return first token in any ls output line containing 'JASMINE', or None."""
-    for line in ls_output.splitlines():
-        for token in line.split():
-            if "JASMINE" in token:
-                return token
-    return None
 
 
 class SSHBridge(QThread):
@@ -50,7 +63,10 @@ class SSHBridge(QThread):
     status_update = pyqtSignal(str)
 
     def __init__(self, host: str, port: int, username: str, password: str,
-                 baud: int = 115200, hop_target: Optional[str] = None, parent=None):
+                 baud: int = 115200, hop_target: Optional[str] = None,
+                 port_filter: str = "JASMINE",
+                 companion_service: Optional[str] = None,
+                 parent=None):
         super().__init__(parent)
         self._host = host
         self._port = port
@@ -58,6 +74,8 @@ class SSHBridge(QThread):
         self._password = password
         self._baud = baud
         self._hop_target = hop_target
+        self._port_filter = port_filter
+        self._companion_service = companion_service
         self._running = False
         self._client: Optional[paramiko.SSHClient] = None
         self._hop_client: Optional[paramiko.SSHClient] = None
@@ -89,7 +107,7 @@ class SSHBridge(QThread):
             return
 
         if self._hop_target:
-            # 2a. Hop — tunnel through primary to secondary; skip MotorControl shutdown
+            # 2a. Hop — tunnel through primary to secondary
             self.status_update.emit(f"Hopping to {self._hop_target}...")
             try:
                 hop_sock = self._client.get_transport().open_channel(
@@ -103,33 +121,65 @@ class SSHBridge(QThread):
             except Exception as exc:
                 self.error.emit(f"Hop to {self._hop_target} failed: {exc}")
                 return
+
+            if self._companion_service:
+                self.status_update.emit(
+                    f"Shutting down {self._companion_service} on {self._hop_target}..."
+                )
+                ok, err = self._shutdown_service_remote(
+                    self._companion_service, self._hop_target
+                )
+                if not ok:
+                    self.error.emit(f"ServiceManager shutdown failed: {err}")
+                    return
+                self.status_update.emit("Waiting for port release...")
+                self.msleep(2000)
+
             serial_client = self._hop_client
         else:
-            # 2b. Direct — shut down MotorControl on primary before touching the port
-            self.status_update.emit("Shutting down MotorControl...")
-            ok, err = self._shutdown_motor_control()
-            if not ok:
-                self.error.emit(f"ServiceManager shutdown failed: {err}")
-                return
-            self.msleep(2000)  # allow ServiceManager to release the port
+            # 2b. Direct — shut down the relevant service before touching the port
+            if self._companion_service:
+                self.status_update.emit(f"Shutting down {self._companion_service}...")
+                ok, err = self._shutdown_companion_service(self._host)
+                if not ok:
+                    self.error.emit(f"ServiceManager shutdown failed: {err}")
+                    return
+                self.status_update.emit("Waiting for port release...")
+                self.msleep(2000)
+            else:
+                self.status_update.emit("Shutting down MotorControl...")
+                ok, err = self._shutdown_service("MotorControl")
+                if not ok:
+                    self.error.emit(f"ServiceManager shutdown failed: {err}")
+                    return
             serial_client = self._client
 
-        # 3. Locate JASMINE serial port on the target host
-        self.status_update.emit("Locating JASMINE serial port...")
-        _, ls_output = self._exec_on(serial_client, "ls /dev/serial/by-id/ 2>/dev/null")
-        port_name = _find_jasmine_port(ls_output)
-        if port_name is None:
-            self.error.emit("JASMINE port not found in /dev/serial/by-id/")
-            return
-
-        # 4. Resolve symlink to absolute device path
-        ok, device_path = self._exec_on(serial_client, f"readlink -f /dev/serial/by-id/{port_name}")
+        # 3 & 4. Poll for target serial port — udev may take time to settle after service exits
+        self.status_update.emit(f"Locating {self._port_filter} serial port...")
+        _FIND_CMD = (
+            f'f=$(ls /dev/serial/by-id/ 2>/dev/null | grep -i {self._port_filter} | head -1);'
+            ' [ -n "$f" ] && readlink -f /dev/serial/by-id/$f'
+        )
+        _MAX_ATTEMPTS = 15  # 15 × 2 s = 30 s ceiling
+        device_path = ""
+        for attempt in range(_MAX_ATTEMPTS):
+            ok, out = self._exec_on(serial_client, _FIND_CMD)
+            if ok and out:
+                device_path = out
+                break
+            if attempt < _MAX_ATTEMPTS - 1:
+                self.status_update.emit(
+                    f"Port not ready, retrying ({attempt + 1}/{_MAX_ATTEMPTS - 1})..."
+                )
+                self.msleep(2000)
         if not device_path:
-            self.error.emit(f"Could not resolve device path for {port_name}")
+            self.error.emit(
+                f"{self._port_filter} port not found in /dev/serial/by-id/ after 30 s"
+            )
             return
 
         # 5. Launch serial relay over persistent SSH channel on the target host
-        self.status_update.emit(f"Port: /dev/serial/by-id/{port_name} → {device_path}")
+        self.status_update.emit(f"Serial port: {device_path}")
         self.status_update.emit(f"Starting serial relay on {device_path}...")
         script = RELAY_SCRIPT.format(port=device_path, baud=self._baud)
         encoded = base64.b64encode(script.encode()).decode()
@@ -147,7 +197,12 @@ class SSHBridge(QThread):
         # 6. Give relay a moment to start; fail fast if it exits immediately
         self.msleep(500)
         if self._channel.exit_status_ready():
-            self.error.emit("Serial relay failed to start")
+            stderr = b""
+            while self._channel.recv_stderr_ready():
+                stderr += self._channel.recv_stderr(4096)
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            msg = f"Serial relay failed to start: {detail}" if detail else "Serial relay failed to start"
+            self.error.emit(msg)
             return
 
         # 7. Mark as connected
@@ -183,12 +238,14 @@ class SSHBridge(QThread):
             self._channel.close()
 
     def _exec_on(self, client: paramiko.SSHClient, cmd: str) -> Tuple[bool, str]:
-        """Run a command on the given SSHClient, return (success, stdout+stderr)."""
-        _, stdout, stderr = client.exec_command(cmd)
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        exit_code = stdout.channel.recv_exit_status()
-        return exit_code == 0, (out + err).strip()
+        """Run a command on the given SSHClient, return (success, combined output)."""
+        channel = client.get_transport().open_session()
+        channel.set_combine_stderr(True)
+        channel.exec_command(cmd)
+        out = channel.makefile("rb").read().decode("utf-8", errors="replace")
+        exit_code = channel.recv_exit_status()
+        channel.close()
+        return exit_code == 0, out.strip()
 
     def _exec(self, cmd: str) -> Tuple[bool, str]:
         return self._exec_on(self._client, cmd)
@@ -204,10 +261,10 @@ class SSHBridge(QThread):
         channel.close()
         return exit_code == 0, out.strip()
 
-    def _shutdown_motor_control(self) -> Tuple[bool, str]:
-        """POST a Shutdown request to ServiceManager for MotorControl."""
+    def _shutdown_service(self, service_name: str) -> Tuple[bool, str]:
+        """POST a Shutdown request to ServiceManager for the named service."""
         url = f"https://{self._host}/SMv2/ServiceStatus"
-        payload = json.dumps({"ServiceName": "MotorControl", "Op": "Shutdown"}).encode()
+        payload = json.dumps({"ServiceName": service_name, "Op": "Shutdown"}).encode()
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -218,6 +275,54 @@ class SSHBridge(QThread):
         )
         try:
             with urllib.request.urlopen(req, context=ctx, timeout=10):
+                pass
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    def _shutdown_companion_service(self, host: str) -> Tuple[bool, str]:
+        """POST a CompanionService shutdown via the SvcMgr API (multipart/form-data, HTTP port 8000)."""
+        boundary = "----JasmineDebuggerBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="SvcShutdown"\r\n\r\n'
+            f"CompanionService\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        url = f"http://{host}:8000/SvcMgr/ActionCommand"
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    def _shutdown_service_remote(self, service_name: str, host: str) -> Tuple[bool, str]:
+        """Shut down a service on a hop target via the primary host's ServiceManager proxy.
+
+        The primary exposes /SvcMgr/Payload/{hop_ip}/ActionCommand to relay commands to hop
+        targets. The dev machine reaches this directly on port 8000 of the primary host.
+        """
+        boundary = "----JasmineDebuggerBoundary"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="SvcShutdown"\r\n\r\n'
+            f"{service_name}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        url = f"http://{self._host}:8000/SvcMgr/Payload/{host}/ActionCommand"
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10):
                 pass
             return True, ""
         except Exception as exc:
