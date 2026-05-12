@@ -122,18 +122,13 @@ class SSHBridge(QThread):
                 self.error.emit(f"Hop to {self._hop_target} failed: {exc}")
                 return
 
-            if self._companion_service:
-                self.status_update.emit(
-                    f"Shutting down {self._companion_service} on {self._hop_target}..."
-                )
-                ok, err = self._shutdown_service_remote(
-                    self._companion_service, self._hop_target
-                )
-                if not ok:
-                    self.error.emit(f"ServiceManager shutdown failed: {err}")
-                    return
-                self.status_update.emit("Waiting for port release...")
-                self.msleep(2000)
+            self.status_update.emit(f"Shutting down CompanionService on {self._hop_target}...")
+            ok, err = self._shutdown_service_remote("CompanionService", self._hop_target)
+            if not ok:
+                self.error.emit(f"ServiceManager shutdown failed: {err}")
+                return
+            self.status_update.emit("Waiting for port release...")
+            self.msleep(2000)
 
             serial_client = self._hop_client
         else:
